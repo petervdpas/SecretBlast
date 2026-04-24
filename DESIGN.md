@@ -1,8 +1,10 @@
 # SecretBlast — Design & Threat Model
 
-Status: **v0.1 implemented.** Argon2id KDF + AES-256-GCM records + header
-canary + atomic writes + auto-lock all live; 27 tests pass. Remaining
-post-v0.1 items are listed at the bottom.
+Status: **1.0.** Argon2id KDF + AES-256-GCM records + header canary + atomic
+writes + auto-lock + per-secret in-process locking, all live. 149 tests
+across build / tamper / malformed / concurrency / KAT surfaces. CI matrix
+green on ubuntu-latest / windows-latest / macos-latest. Remaining post-1.0
+items are listed at the bottom.
 
 ## Goals
 

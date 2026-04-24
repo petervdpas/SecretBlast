@@ -12,8 +12,9 @@ The vault is a plain directory of files, encrypted with a master password, porta
 
 ---
 
-> ✅ **Status:** v0.1 implemented. Crypto paths are live (Argon2id + AES-256-GCM),
-> full round-trip tested. See [DESIGN.md](DESIGN.md) for the format spec and threat model.
+> ✅ **Status:** 1.0 — Argon2id + AES-256-GCM, 149 tests across the build / tamper /
+> malformed / concurrency / KAT surfaces, CI matrix green on Linux / Windows / macOS.
+> See [DESIGN.md](DESIGN.md) for the format spec and threat model.
 
 ---
 
