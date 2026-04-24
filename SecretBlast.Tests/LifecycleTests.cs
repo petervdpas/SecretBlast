@@ -124,21 +124,24 @@ public sealed class LifecycleTests : IDisposable
     [Fact]
     public async Task AutoLock_IsResetByActivity()
     {
-        using var vault = SecretVault.Create(
-            VaultPath, "pw", TestVaultOptions.FastWithAutoLock(TimeSpan.FromMilliseconds(250)));
+        // Generous margins: Windows timer resolution is coarse (~15 ms) and CI
+        // schedulers can overshoot Task.Delay significantly. Keep the activity
+        // interval well under the idle timeout so the test isn't a dead heat.
+        var idle = TimeSpan.FromMilliseconds(1000);
+        using var vault = SecretVault.Create(VaultPath, "pw", TestVaultOptions.FastWithAutoLock(idle));
 
         // Bump the timer twice while it's still counting down; the vault must
-        // remain unlocked until ~250 ms AFTER the last op.
+        // remain unlocked until ~1 s after the LAST op.
         await vault.SetAsync("k", "v1");
-        await Task.Delay(150);
+        await Task.Delay(300);
         Assert.False(vault.IsLocked);
 
         await vault.SetAsync("k", "v2");
-        await Task.Delay(150);
+        await Task.Delay(300);
         Assert.False(vault.IsLocked);
 
-        // Now go idle past the timeout.
-        await Task.Delay(400);
+        // Now go idle well past the timeout (1.5x the idle window).
+        await Task.Delay(1500);
         Assert.True(vault.IsLocked);
     }
 
