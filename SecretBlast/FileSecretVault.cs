@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -26,6 +27,12 @@ internal sealed class FileSecretVault : ISecretVault
     private readonly VaultOptions _options;
     private readonly VaultHeader _header;
     private readonly object _stateLock = new();
+
+    // Per-secret in-process lock. Serializes concurrent Get/Set/Delete on the
+    // same name so Windows's file-sharing semantics (File.Move can't replace a
+    // file another handle is reading) don't surface as UnauthorizedAccessException
+    // or IOException from user code. Ops on different names still run in parallel.
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _nameLocks = new();
 
     private byte[]? _key;
     private Timer? _autoLockTimer;
@@ -210,32 +217,41 @@ internal sealed class FileSecretVault : ISecretVault
     public async Task<string> GetAsync(string name, CancellationToken ct = default)
     {
         ValidateName(name);
-        var (key, vaultId) = TakeKeyCopyAndResetTimer();
+        var nameLock = NameLock(name);
+        await nameLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var recordPath = GetRecordPath(name);
-            if (!File.Exists(recordPath)) throw new SecretNotFoundException(name);
-
-            var record = await Task.Run(() => JsonIo.Read<SecretRecord>(recordPath), ct).ConfigureAwait(false);
-            ValidateRecord(record, recordPath);
-            var (nonce, cipher, tag) = DecodeRecord(record, recordPath);
-
-            byte[] plaintext;
+            var (key, vaultId) = TakeKeyCopyAndResetTimer();
             try
             {
-                plaintext = VaultCrypto.Decrypt(key, vaultId, name, nonce, cipher, tag);
-            }
-            catch (AuthenticationTagMismatchException ex)
-            {
-                throw new VaultCorruptException($"Secret '{name}' failed authentication — file tampered or from another vault.", ex);
-            }
+                var recordPath = GetRecordPath(name);
+                if (!File.Exists(recordPath)) throw new SecretNotFoundException(name);
 
-            try { return Encoding.UTF8.GetString(plaintext); }
-            finally { CryptographicOperations.ZeroMemory(plaintext); }
+                var record = await Task.Run(() => JsonIo.Read<SecretRecord>(recordPath), ct).ConfigureAwait(false);
+                ValidateRecord(record, recordPath);
+                var (nonce, cipher, tag) = DecodeRecord(record, recordPath);
+
+                byte[] plaintext;
+                try
+                {
+                    plaintext = VaultCrypto.Decrypt(key, vaultId, name, nonce, cipher, tag);
+                }
+                catch (AuthenticationTagMismatchException ex)
+                {
+                    throw new VaultCorruptException($"Secret '{name}' failed authentication — file tampered or from another vault.", ex);
+                }
+
+                try { return Encoding.UTF8.GetString(plaintext); }
+                finally { CryptographicOperations.ZeroMemory(plaintext); }
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(key);
+            }
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(key);
+            nameLock.Release();
         }
     }
 
@@ -243,53 +259,70 @@ internal sealed class FileSecretVault : ISecretVault
     {
         ValidateName(name);
         if (value is null) throw new ArgumentNullException(nameof(value));
-        var (key, vaultId) = TakeKeyCopyAndResetTimer();
+        var nameLock = NameLock(name);
+        await nameLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var plaintext = Encoding.UTF8.GetBytes(value);
-            SecretRecord record;
+            var (key, vaultId) = TakeKeyCopyAndResetTimer();
             try
             {
-                var (nonce, cipher, tag) = VaultCrypto.Encrypt(key, vaultId, name, plaintext);
-                record = new SecretRecord
+                var plaintext = Encoding.UTF8.GetBytes(value);
+                SecretRecord record;
+                try
                 {
-                    Version = 1,
-                    Algorithm = "aes-256-gcm",
-                    Nonce = Convert.ToBase64String(nonce),
-                    Ciphertext = Convert.ToBase64String(cipher),
-                    Tag = Convert.ToBase64String(tag),
-                    UpdatedUtc = DateTime.UtcNow,
-                };
+                    var (nonce, cipher, tag) = VaultCrypto.Encrypt(key, vaultId, name, plaintext);
+                    record = new SecretRecord
+                    {
+                        Version = 1,
+                        Algorithm = "aes-256-gcm",
+                        Nonce = Convert.ToBase64String(nonce),
+                        Ciphertext = Convert.ToBase64String(cipher),
+                        Tag = Convert.ToBase64String(tag),
+                        UpdatedUtc = DateTime.UtcNow,
+                    };
+                }
+                finally
+                {
+                    CryptographicOperations.ZeroMemory(plaintext);
+                }
+
+                var recordPath = GetRecordPath(name);
+                await Task.Run(() => JsonIo.WriteAtomic(recordPath, record), ct).ConfigureAwait(false);
             }
             finally
             {
-                CryptographicOperations.ZeroMemory(plaintext);
+                CryptographicOperations.ZeroMemory(key);
             }
-
-            var recordPath = GetRecordPath(name);
-            await Task.Run(() => JsonIo.WriteAtomic(recordPath, record), ct).ConfigureAwait(false);
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(key);
+            nameLock.Release();
         }
     }
 
-    public Task DeleteAsync(string name, CancellationToken ct = default)
+    public async Task DeleteAsync(string name, CancellationToken ct = default)
     {
         ValidateName(name);
-        var (key, _) = TakeKeyCopyAndResetTimer(); // enforce unlock + reset idle timer
+        var nameLock = NameLock(name);
+        await nameLock.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var recordPath = GetRecordPath(name);
-            if (!File.Exists(recordPath)) throw new SecretNotFoundException(name);
+            var (key, _) = TakeKeyCopyAndResetTimer(); // enforce unlock + reset idle timer
+            try
+            {
+                var recordPath = GetRecordPath(name);
+                if (!File.Exists(recordPath)) throw new SecretNotFoundException(name);
 
-            File.Delete(recordPath);
-            return Task.CompletedTask;
+                File.Delete(recordPath);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(key);
+            }
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(key);
+            nameLock.Release();
         }
     }
 
@@ -334,6 +367,9 @@ internal sealed class FileSecretVault : ISecretVault
 
     private string GetRecordPath(string name) =>
         Path.Combine(_vaultPath, SecretsDirName, name + SecretExtension);
+
+    private SemaphoreSlim NameLock(string name) =>
+        _nameLocks.GetOrAdd(name, _ => new SemaphoreSlim(1, 1));
 
     private static void ValidateRecord(SecretRecord record, string path)
     {
