@@ -12,8 +12,8 @@ The vault is a plain directory of files, encrypted with a master password, porta
 
 ---
 
-> 🚧 **Status:** stub. The public API is defined; crypto paths throw `NotImplementedException`.
-> See [DESIGN.md](DESIGN.md) for the full design and threat model.
+> ✅ **Status:** v0.1 implemented. Crypto paths are live (Argon2id + AES-256-GCM),
+> full round-trip tested. See [DESIGN.md](DESIGN.md) for the format spec and threat model.
 
 ---
 

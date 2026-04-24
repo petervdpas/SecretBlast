@@ -1,6 +1,8 @@
 # SecretBlast — Design & Threat Model
 
-Status: **design locked**, implementation pending.
+Status: **v0.1 implemented.** Argon2id KDF + AES-256-GCM records + header
+canary + atomic writes + auto-lock all live; 27 tests pass. Remaining
+post-v0.1 items are listed at the bottom.
 
 ## Goals
 
@@ -214,12 +216,36 @@ Func<string, CancellationToken, Task<string>> secretResolver
 TaskBlaster is the thing that adapts `ISecretVault.GetAsync` into that
 delegate. AzureBlast never depends on crypto code.
 
-## Open items (post-stub)
+## Decisions taken in v0.1
+
+* **Canary format.** Header contains an AES-GCM record encrypting the
+  fixed string `canary-v1` with AAD = `"SecretBlast" || vaultId || "canary"`.
+  A wrong password fails the GCM tag check → `InvalidMasterPasswordException`.
+* **`Create` over non-empty directory.** Allowed as long as no `vault.json`
+  exists. We do not inspect other files in the directory.
+* **`Create` over existing vault.** Throws `VaultAlreadyExistsException`.
+* **`Open` with no `vault.json`.** Throws `VaultNotFoundException` eagerly,
+  so bad paths surface before the unlock dialog.
+* **`UnlockAsync` on an already-unlocked vault.** No-op. Does not re-derive,
+  does not validate the supplied password. Rationale: callers who hold the
+  vault reference have already proven the password once.
+* **Auto-lock.** `System.Threading.Timer` reset on every op. Fires `Lock()`
+  on elapse. `TimeSpan.Zero` / `Timeout.InfiniteTimeSpan` disables it.
+* **Cancellation during Argon2id.** The `CancellationToken` accepted by
+  `UnlockAsync` cancels the *wait* but not the in-flight derivation —
+  Konscious does not expose a cancellable primitive. Acceptable for v0.1
+  given derivation takes a few hundred ms at default parameters.
+* **Key zeroing on lock.** `CryptographicOperations.ZeroMemory(_key)`.
+  Best-effort — GC/JIT/paging can still leave copies — but free and correct.
+
+## Open items (post-v0.1)
 
 * Benchmark Argon2id defaults on typical hardware; tune.
-* Decide the `Create` flow for a pre-existing directory (merge? refuse?).
-* Decide the behaviour of `UnlockAsync` while already unlocked
-  (no-op? re-derive? throw?).
+* KDF / algorithm migration: a vault created at `version: 1` should be
+  readable by a future `version: 2` without a manual export/import.
+* Concurrent writers (multiple processes on the same vault directory).
+  Today: no cross-process lock; last writer wins for a given secret file.
 * CLI (`secretblast unlock | get | set | list`)?
 * `SecretBlast.Extensions.DependencyInjection` companion package with
   `AddSecretBlast(path)` helper?
+* Optional encrypted-names mode (format version bump) if ever needed.

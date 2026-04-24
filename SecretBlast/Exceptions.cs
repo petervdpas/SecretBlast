@@ -41,3 +41,21 @@ public sealed class VaultAlreadyExistsException : SecretBlastException
     public VaultAlreadyExistsException(string path)
         : base($"A vault already exists at '{path}'.") { }
 }
+
+/// <summary>Thrown when <c>Open</c> is called on a path with no vault header.</summary>
+public sealed class VaultNotFoundException : SecretBlastException
+{
+    /// <summary>Create a new <see cref="VaultNotFoundException"/> for the given path.</summary>
+    public VaultNotFoundException(string path)
+        : base($"No vault found at '{path}'.") { }
+}
+
+/// <summary>Thrown when a vault file on disk is malformed, truncated, or a record fails authentication.</summary>
+public sealed class VaultCorruptException : SecretBlastException
+{
+    /// <summary>Create a new <see cref="VaultCorruptException"/> with a descriptive message.</summary>
+    public VaultCorruptException(string message) : base(message) { }
+
+    /// <summary>Create a new <see cref="VaultCorruptException"/> wrapping an inner exception.</summary>
+    public VaultCorruptException(string message, Exception inner) : base(message, inner) { }
+}
