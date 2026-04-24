@@ -29,18 +29,29 @@ internal static class JsonIo
     }
 
     /// <summary>
-    /// Atomic write: serialize to <paramref name="path"/>.tmp, flush, and rename
-    /// over the target. A crash between the tmp write and the rename leaves the
-    /// original file (if any) intact.
+    /// Atomic write: serialize to a per-call temp file, then rename over the
+    /// target. A crash between the temp write and the rename leaves the
+    /// original (if any) intact. The temp name embeds a GUID so concurrent
+    /// writers to the same path don't collide on the temp file itself
+    /// (rename over the final path is still the linearization point; last
+    /// writer wins).
     /// </summary>
     internal static void WriteAtomic<T>(string path, T value)
     {
         var dir = Path.GetDirectoryName(path);
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
 
-        var tmp = path + ".tmp";
+        var tmp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         var json = JsonSerializer.Serialize(value, Options);
-        File.WriteAllText(tmp, json);
-        File.Move(tmp, path, overwrite: true);
+        try
+        {
+            File.WriteAllText(tmp, json);
+            File.Move(tmp, path, overwrite: true);
+        }
+        catch
+        {
+            try { File.Delete(tmp); } catch { /* best-effort cleanup */ }
+            throw;
+        }
     }
 }

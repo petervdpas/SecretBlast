@@ -210,69 +210,87 @@ internal sealed class FileSecretVault : ISecretVault
     public async Task<string> GetAsync(string name, CancellationToken ct = default)
     {
         ValidateName(name);
-        var (key, vaultId) = TakeKeySnapshotAndResetTimer();
-
-        var recordPath = GetRecordPath(name);
-        if (!File.Exists(recordPath)) throw new SecretNotFoundException(name);
-
-        var record = await Task.Run(() => JsonIo.Read<SecretRecord>(recordPath), ct).ConfigureAwait(false);
-        ValidateRecord(record, recordPath);
-        var (nonce, cipher, tag) = DecodeRecord(record, recordPath);
-
-        byte[] plaintext;
+        var (key, vaultId) = TakeKeyCopyAndResetTimer();
         try
         {
-            plaintext = VaultCrypto.Decrypt(key, vaultId, name, nonce, cipher, tag);
-        }
-        catch (AuthenticationTagMismatchException ex)
-        {
-            throw new VaultCorruptException($"Secret '{name}' failed authentication — file tampered or from another vault.", ex);
-        }
+            var recordPath = GetRecordPath(name);
+            if (!File.Exists(recordPath)) throw new SecretNotFoundException(name);
 
-        try { return Encoding.UTF8.GetString(plaintext); }
-        finally { CryptographicOperations.ZeroMemory(plaintext); }
+            var record = await Task.Run(() => JsonIo.Read<SecretRecord>(recordPath), ct).ConfigureAwait(false);
+            ValidateRecord(record, recordPath);
+            var (nonce, cipher, tag) = DecodeRecord(record, recordPath);
+
+            byte[] plaintext;
+            try
+            {
+                plaintext = VaultCrypto.Decrypt(key, vaultId, name, nonce, cipher, tag);
+            }
+            catch (AuthenticationTagMismatchException ex)
+            {
+                throw new VaultCorruptException($"Secret '{name}' failed authentication — file tampered or from another vault.", ex);
+            }
+
+            try { return Encoding.UTF8.GetString(plaintext); }
+            finally { CryptographicOperations.ZeroMemory(plaintext); }
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(key);
+        }
     }
 
     public async Task SetAsync(string name, string value, CancellationToken ct = default)
     {
         ValidateName(name);
         if (value is null) throw new ArgumentNullException(nameof(value));
-        var (key, vaultId) = TakeKeySnapshotAndResetTimer();
-
-        var plaintext = Encoding.UTF8.GetBytes(value);
-        SecretRecord record;
+        var (key, vaultId) = TakeKeyCopyAndResetTimer();
         try
         {
-            var (nonce, cipher, tag) = VaultCrypto.Encrypt(key, vaultId, name, plaintext);
-            record = new SecretRecord
+            var plaintext = Encoding.UTF8.GetBytes(value);
+            SecretRecord record;
+            try
             {
-                Version = 1,
-                Algorithm = "aes-256-gcm",
-                Nonce = Convert.ToBase64String(nonce),
-                Ciphertext = Convert.ToBase64String(cipher),
-                Tag = Convert.ToBase64String(tag),
-                UpdatedUtc = DateTime.UtcNow,
-            };
+                var (nonce, cipher, tag) = VaultCrypto.Encrypt(key, vaultId, name, plaintext);
+                record = new SecretRecord
+                {
+                    Version = 1,
+                    Algorithm = "aes-256-gcm",
+                    Nonce = Convert.ToBase64String(nonce),
+                    Ciphertext = Convert.ToBase64String(cipher),
+                    Tag = Convert.ToBase64String(tag),
+                    UpdatedUtc = DateTime.UtcNow,
+                };
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(plaintext);
+            }
+
+            var recordPath = GetRecordPath(name);
+            await Task.Run(() => JsonIo.WriteAtomic(recordPath, record), ct).ConfigureAwait(false);
         }
         finally
         {
-            CryptographicOperations.ZeroMemory(plaintext);
+            CryptographicOperations.ZeroMemory(key);
         }
-
-        var recordPath = GetRecordPath(name);
-        await Task.Run(() => JsonIo.WriteAtomic(recordPath, record), ct).ConfigureAwait(false);
     }
 
     public Task DeleteAsync(string name, CancellationToken ct = default)
     {
         ValidateName(name);
-        _ = TakeKeySnapshotAndResetTimer(); // enforce unlock + reset idle timer
+        var (key, _) = TakeKeyCopyAndResetTimer(); // enforce unlock + reset idle timer
+        try
+        {
+            var recordPath = GetRecordPath(name);
+            if (!File.Exists(recordPath)) throw new SecretNotFoundException(name);
 
-        var recordPath = GetRecordPath(name);
-        if (!File.Exists(recordPath)) throw new SecretNotFoundException(name);
-
-        File.Delete(recordPath);
-        return Task.CompletedTask;
+            File.Delete(recordPath);
+            return Task.CompletedTask;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(key);
+        }
     }
 
     public Task<IReadOnlyList<string>> ListAsync(CancellationToken ct = default)
@@ -295,14 +313,22 @@ internal sealed class FileSecretVault : ISecretVault
     // Helpers
     // =============================================================
 
-    private (byte[] key, string vaultId) TakeKeySnapshotAndResetTimer()
+    /// <summary>
+    /// Copy the master key under the lock and reset the idle timer. Callers use
+    /// the returned copy for their crypto op and zero it in <c>finally</c>. This
+    /// means a racing <see cref="Lock"/> only zeroes the member — the in-flight
+    /// op still has its own valid copy and completes cleanly.
+    /// </summary>
+    private (byte[] keyCopy, string vaultId) TakeKeyCopyAndResetTimer()
     {
         lock (_stateLock)
         {
             ThrowIfDisposedLocked();
             if (_key is null) throw new VaultLockedException();
             StartOrResetAutoLock();
-            return (_key, _header.VaultId);
+            var copy = new byte[_key.Length];
+            Buffer.BlockCopy(_key, 0, copy, 0, _key.Length);
+            return (copy, _header.VaultId);
         }
     }
 
