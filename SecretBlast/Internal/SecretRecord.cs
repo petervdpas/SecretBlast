@@ -8,9 +8,11 @@ namespace SecretBlast.Internal;
 /// </summary>
 internal sealed class SecretRecord
 {
+    /// <summary>Format version of this record. Bumped when the on-disk shape changes.</summary>
     [JsonPropertyName("version")]
     public int Version { get; set; } = 1;
 
+    /// <summary>Symmetric algorithm identifier. Always <c>aes-256-gcm</c> in v1.</summary>
     [JsonPropertyName("algorithm")]
     public string Algorithm { get; set; } = "aes-256-gcm";
 
@@ -26,6 +28,7 @@ internal sealed class SecretRecord
     [JsonPropertyName("tag")]
     public string Tag { get; set; } = string.Empty;
 
+    /// <summary>UTC timestamp of the most recent write.</summary>
     [JsonPropertyName("updatedUtc")]
     public DateTime UpdatedUtc { get; set; }
 }
