@@ -216,6 +216,7 @@ internal sealed class FileSecretVault : ISecretVault
         if (!File.Exists(recordPath)) throw new SecretNotFoundException(name);
 
         var record = await Task.Run(() => JsonIo.Read<SecretRecord>(recordPath), ct).ConfigureAwait(false);
+        ValidateRecord(record, recordPath);
         var (nonce, cipher, tag) = DecodeRecord(record, recordPath);
 
         byte[] plaintext;
@@ -308,19 +309,36 @@ internal sealed class FileSecretVault : ISecretVault
     private string GetRecordPath(string name) =>
         Path.Combine(_vaultPath, SecretsDirName, name + SecretExtension);
 
+    private static void ValidateRecord(SecretRecord record, string path)
+    {
+        if (record.Version != 1)
+            throw new VaultCorruptException($"Unsupported secret-record version {record.Version} at '{path}'.");
+        if (!string.Equals(record.Algorithm, "aes-256-gcm", StringComparison.OrdinalIgnoreCase))
+            throw new VaultCorruptException($"Unsupported record algorithm '{record.Algorithm}' at '{path}'.");
+        if (string.IsNullOrEmpty(record.Nonce) || string.IsNullOrEmpty(record.Tag))
+            throw new VaultCorruptException($"Secret record at '{path}' is missing nonce or tag.");
+    }
+
     private static (byte[] nonce, byte[] cipher, byte[] tag) DecodeRecord(SecretRecord record, string path)
     {
+        byte[] nonce, cipher, tag;
         try
         {
-            return (
-                Convert.FromBase64String(record.Nonce),
-                Convert.FromBase64String(record.Ciphertext),
-                Convert.FromBase64String(record.Tag));
+            nonce  = Convert.FromBase64String(record.Nonce);
+            cipher = Convert.FromBase64String(record.Ciphertext);
+            tag    = Convert.FromBase64String(record.Tag);
         }
         catch (FormatException ex)
         {
             throw new VaultCorruptException($"Secret record at '{path}' contains invalid base64.", ex);
         }
+
+        if (nonce.Length != VaultCrypto.NonceLength)
+            throw new VaultCorruptException($"Secret record at '{path}' has nonce of wrong length ({nonce.Length} bytes, expected {VaultCrypto.NonceLength}).");
+        if (tag.Length != VaultCrypto.TagLength)
+            throw new VaultCorruptException($"Secret record at '{path}' has tag of wrong length ({tag.Length} bytes, expected {VaultCrypto.TagLength}).");
+
+        return (nonce, cipher, tag);
     }
 
     private static void ValidateName(string name)
