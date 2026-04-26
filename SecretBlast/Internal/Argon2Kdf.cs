@@ -22,7 +22,11 @@ internal static class Argon2Kdf
     /// Derive a 32-byte key from the given password and salt under the supplied
     /// parameters. Runs on a thread-pool thread so the caller's thread is not
     /// blocked. The cancellation token cancels the wait but not the in-flight
-    /// derivation — Konscious does not expose a cancellable primitive.
+    /// derivation; Konscious does not expose a cancellable primitive.
+    /// The password is Unicode-normalised to NFC before UTF-8 encoding so that
+    /// callers who type the same characters via different input methods
+    /// (composed vs decomposed, e.g. typed e-acute vs pasted from macOS HFS+)
+    /// always derive the same key. ASCII passwords are unaffected.
     /// </summary>
     internal static Task<byte[]> DeriveAsync(
         string password,
@@ -35,7 +39,7 @@ internal static class Argon2Kdf
         if (salt.Length != SaltLength)
             throw new ArgumentException($"Salt must be {SaltLength} bytes.", nameof(salt));
 
-        var pwBytes = Encoding.UTF8.GetBytes(password);
+        var pwBytes = Encoding.UTF8.GetBytes(password.Normalize(NormalizationForm.FormC));
 
         return Task.Run(() =>
         {
